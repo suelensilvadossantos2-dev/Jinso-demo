@@ -1,10 +1,10 @@
 "use client";
 
 import { ReactNode } from "react";
-import { ArrowRight, Sparkles } from "lucide-react";
+import { ArrowRight, CircleHelp, Sparkles } from "lucide-react";
 
-export function MetricCard({ icon, value, label, tone = "blue" }: { icon: ReactNode; value: string; label: string; tone?: "blue" | "gold" | "red" }) {
-  return <div className="metric-card"><span className={`metric-icon metric-icon--${tone}`}>{icon}</span><div><strong>{value}</strong><span>{label}</span></div></div>;
+export function MetricCard({ icon, value, label, tone = "blue", tooltip }: { icon: ReactNode; value: string; label: string; tone?: "blue" | "gold" | "red"; tooltip?: string }) {
+  return <div className="metric-card"><span className={`metric-icon metric-icon--${tone}`}>{icon}</span><div><strong>{value}</strong><span>{label}</span></div>{tooltip && <span className="metric-help" title={tooltip} aria-label={tooltip}><CircleHelp size={16} /></span>}</div>;
 }
 
 export function InsightCard({ title = "What Jinso noticed", children }: { title?: string; children: ReactNode }) {

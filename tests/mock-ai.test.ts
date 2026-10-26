@@ -17,6 +17,19 @@ test("teacher mock answers remain grounded in the fictional learner profile", ()
   assert.match(reply.content, /45%/);
 });
 
+test("institutional mock answers use the academic outcomes dataset", () => {
+  const standards = mockReply("institution", "Are our B2 learners meeting our curriculum standards?");
+  assert.match(standards.content, /81% against 78%/i);
+  assert.match(standards.content, /Written Production is 74% against 80%/i);
+  assert.match(standards.content, /Listening Comprehension is 76% against 80%/i);
+  assert.doesNotMatch(standards.content, /mediation|recommendations are/i);
+
+  const evidence = mockReply("institution", "What assessment evidence supports these conclusions?");
+  assert.match(evidence.content, /moderated discussions and role-plays/i);
+  assert.match(evidence.content, /extended assignments and reports/i);
+  assert.match(evidence.content, /extended explanations, discussions, and presentations/i);
+});
+
 test("general advisor avoids inventing missing product claims", () => {
   const reply = mockReply("general", "What can Jinso do for a teacher?");
   assert.match(reply.content, /class-level patterns/i);

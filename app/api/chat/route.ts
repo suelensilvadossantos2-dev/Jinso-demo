@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { mockReply } from "@/lib/mock-ai";
 import { grammarTargets, personalities, replyTravelChallenge, travelMilestones, vocabularyTargets } from "@/lib/travel-challenge";
-import { courses, institutionPeriods, institutionSkills, learners, teacherSkills } from "@/lib/data";
+import { b2InstitutionalOutcomes, courses, institutionPeriods, learners, teacherSkills } from "@/lib/data";
+import { respondToTeacherStudio, teacherActivitySchema } from "@/lib/teacher-studio";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
@@ -21,6 +22,10 @@ const bodySchema = z.object({
     milestones: z.array(z.number().int().min(1).max(4)).max(4),
     recommendation: z.string().max(80).optional(),
   }).optional(),
+  teacherStudio: z.object({
+    currentActivity: teacherActivitySchema.optional(),
+    classroomContext: z.string().max(800).optional(),
+  }).optional(),
 });
 
 type Bucket = { count: number; resetAt: number };
@@ -38,9 +43,18 @@ function limited(key: string, limit: number, windowMs: number) {
 
 const systems = {
   teacher: `You are Jinso's classroom assistant. Answer only from this fictional illustrative classroom dataset: ${JSON.stringify({ teacherSkills, learners })}. Be concise, evidence-conscious, and never imply this is real student data. If naming Lucia Martínez or Sofia Herrera, include a learnerRef field with lucia or sofia in JSON. Return JSON with content and optional learnerRef.`,
-  institution: `You are Jinso's institutional learning intelligence assistant. Answer only from this fictional illustrative dataset: ${JSON.stringify({ institutionPeriods, institutionSkills, courses })}. Define percentages as illustrative indicators, not CEFR levels or certified gains. Be concise and evidence-conscious. Return JSON with content.`,
+  institution: `You are Jinso's institutional academic intelligence assistant. Answer only from this fictional illustrative dataset: ${JSON.stringify({ institutionPeriods, b2InstitutionalOutcomes, courses })}. Institutional outcomes and benchmarks are primary; CEFR mappings are paraphrased external context and are not certification or percentage scores. Distinguish formally assessed evidence from practice signals and AI-assisted observations. Do not make causal claims. Be concise, professional, and evidence-conscious. Return JSON with content.`,
   general: `You are Jinso, a warm, thoughtful education consultant. Use only this confirmed product knowledge:\n${productKnowledge}\nDo not invent features, results, terms, or pricing. If information is unavailable, say so and suggest speaking with the team. Return JSON with content.`,
 };
+
+function teacherStudioSystem(studio: NonNullable<z.infer<typeof bodySchema>["teacherStudio"]>) {
+  return `You are Jinso, a concise and practical teaching assistant inside Jinso Teacher Studio. You create and revise academically appropriate classroom activities. Never invent real student records, claim an activity was saved, assigned, or published, or imply formal CEFR certification. Any classroom context is fictional sample data. Put substantive activity content in the structured activity field and keep the conversational content to one or two useful sentences.
+
+Current activity (preserve it as the starting point for small revisions): ${JSON.stringify(studio.currentActivity || null)}
+Relevant fictional classroom context: ${studio.classroomContext || "None provided."}
+
+When the user requests an activity or revision, return JSON with content and an activity matching this exact shape: { id, title, level (A2|B1|B2|C1), primarySkill (Speaking|Listening|Reading|Writing), learningFocus (one or more of: Spoken Interaction|Spoken Production|Grammatical Control|Vocabulary Development|Written Production|Listening Comprehension|Reading Comprehension), duration (integer minutes), objective, instructions, stages: [{title, description}], assessmentCriteria: string[], version (integer), revisionNote (optional) }. Use exactly one primary skill. Never create additional skill or learning-focus categories. Discussions and debates are Speaking; persuasive texts are Writing; information-explanation tasks use the primary skill learners actually practice. For revisions, keep unrelated fields stable, preserve classification unless the requested task mode changes, and increment version. Ensure the objective, stages, instructions, and criteria genuinely exercise the selected primary skill. For advice that does not require a material, omit activity. Ask a clarification question only when essential.`;
+}
 
 function studentSystem(scenario: NonNullable<z.infer<typeof bodySchema>["studentScenario"]>) {
   return `You are Jinso acting as a customer in a short B2 English travel-agent role-play called The Dream Vacation Challenge. Stay in character, be concise and natural, ask one question at a time, and respond to the learner's actual idea. Do not teach or correct after every message. Do not reveal the surprise before a meaningful recommendation and never repeat it. Accept reasonable destinations; this evaluates communication, not travel expertise. If the learner asks for help, guide without supplying a complete answer.
@@ -59,6 +73,11 @@ const aiStudentResult = z.object({
   destinationCard: z.object({ name: z.string().min(1).max(80), subtitle: z.string().min(1).max(140) }).optional(),
 });
 
+const aiTeacherStudioResult = z.object({
+  content: z.string().min(1).max(1200),
+  activity: teacherActivitySchema.optional(),
+});
+
 export async function POST(request: NextRequest) {
   const parsed = bodySchema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) return NextResponse.json({ error: "Please send a shorter, valid message." }, { status: 400 });
@@ -73,7 +92,7 @@ export async function POST(request: NextRequest) {
   if (sessionCount >= sessionLimit) return NextResponse.json({ error: "This demo session has reached its message limit. Refresh later to begin a new session." }, { status: 429 });
   sessionStore.set(sessionId, sessionCount + 1);
 
-  const { context, messages, studentScenario } = parsed.data;
+  const { context, messages, studentScenario, teacherStudio } = parsed.data;
   const lastPrompt = messages.at(-1)!.content;
   const apiKey = process.env.OPENAI_API_KEY;
   let payload: Record<string, unknown>;
@@ -82,6 +101,9 @@ export async function POST(request: NextRequest) {
     if (context === "student" && studentScenario) {
       const result = replyTravelChallenge(lastPrompt, studentScenario);
       payload = { message: { role: "assistant", content: result.content }, evaluation: result.evaluation, studentState: result.state, destinationCard: result.destinationCard, mode: "mock" };
+    } else if (context === "teacher" && teacherStudio) {
+      const result = respondToTeacherStudio(lastPrompt, teacherStudio.currentActivity);
+      payload = { message: { role: "assistant", content: result.content }, activity: result.activity, mode: "mock" };
     } else {
       const turn = messages.filter((message) => message.role === "user").length;
       const result = mockReply(context, lastPrompt, turn);
@@ -94,7 +116,7 @@ export async function POST(request: NextRequest) {
       const response = await fetch(`${process.env.OPENAI_BASE_URL || "https://api.openai.com/v1"}/chat/completions`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify({ model: process.env.OPENAI_MODEL || "gpt-4o-mini", temperature: 0.4, max_tokens: 420, response_format: { type: "json_object" }, messages: [{ role: "system", content: context === "student" && studentScenario ? studentSystem(studentScenario) : systems[context as keyof typeof systems] }, ...messages.slice(-10)] }),
+        body: JSON.stringify({ model: process.env.OPENAI_MODEL || "gpt-4o-mini", temperature: 0.35, max_tokens: context === "teacher" && teacherStudio ? 1300 : 420, response_format: { type: "json_object" }, messages: [{ role: "system", content: context === "student" && studentScenario ? studentSystem(studentScenario) : context === "teacher" && teacherStudio ? teacherStudioSystem(teacherStudio) : systems[context as keyof typeof systems] }, ...messages.slice(-10)] }),
         signal: controller.signal,
       });
       if (!response.ok) throw new Error("The AI service could not answer right now.");
@@ -104,6 +126,9 @@ export async function POST(request: NextRequest) {
       if (context === "student" && studentScenario) {
         const validated = aiStudentResult.parse(result);
         payload = { message: { role: "assistant", content: validated.content }, evaluation: { vocabulary: validated.vocabulary, grammar: validated.grammar, milestones: validated.milestones }, studentState: validated.studentState, destinationCard: validated.destinationCard, mode: "real" };
+      } else if (context === "teacher" && teacherStudio) {
+        const validated = aiTeacherStudioResult.parse(result);
+        payload = { message: { role: "assistant", content: validated.content }, activity: validated.activity, mode: "real" };
       } else {
         payload = { message: { role: "assistant", content: result.content, learnerRef: result.learnerRef }, mode: "real" };
       }
